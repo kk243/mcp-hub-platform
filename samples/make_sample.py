@@ -2,8 +2,7 @@
 
     python samples/make_sample.py
 
-- wf_bad_lot_cause.zip        : 원본 workflow (tool 2, skill 2, 단계 3)
-- wf_bad_lot_cause_teamA.zip  : A팀 변형. tool 2개는 재사용, 리포트 skill만 새로 등록
+- wf_chart_monitoring.zip : 차트 이상 감지 workflow (단계 3 = skill 3, tool 8)
 """
 import zipfile
 from pathlib import Path
@@ -12,153 +11,232 @@ import yaml
 
 HERE = Path(__file__).parent
 
-BAD_LOT_QUERY = '''import os
-
-import oracledb
+DAILY_TRIGGER = '''from apscheduler.schedulers.blocking import BlockingScheduler
 
 
-def run(start_date, end_date):
-    conn = oracledb.connect(dsn=os.environ["MES_DSN"], user=os.environ["MES_USER"],
-                            password=os.environ["MES_PASSWORD"])
+def run(job):
+    sched = BlockingScheduler(timezone="Asia/Seoul")
+    sched.add_job(job, "cron", hour=7, minute=0)
+    sched.start()
+'''
+
+CHART_LIST = '''from lake_client import query
+
+
+def run(user_id):
+    sql = "SELECT chart_id, chart_name, item, spec_usl, spec_lsl FROM smartTAS.MY_CHART WHERE user_id = :u"
+    return query(sql, u=user_id)
+'''
+
+RESPONSE_DATA = '''from lake_client import query
+
+
+def run(charts, base_date):
     sql = """
-        SELECT b.lot_id, b.qty, h.step_id
-          FROM MES.BAD_LOT b JOIN MES.LOT_HIST h ON b.lot_id = h.lot_id
-         WHERE b.bad_date BETWEEN :s AND :e
+        SELECT chart_id, ts, value FROM smartTAS.RESPONSE_DATA
+         WHERE chart_id IN :ids AND ts >= :d - INTERVAL '30' DAY
     """
-    with conn.cursor() as cur:
-        cur.execute(sql, s=start_date, e=end_date)
-        cols = [c[0].lower() for c in cur.description]
-        return [dict(zip(cols, r)) for r in cur.fetchall()]
+    return query(sql, ids=tuple(c["chart_id"] for c in charts), d=base_date)
 '''
 
-EQUIPMENT_HISTORY = '''import requests
-
-EQP_API = "http://eqp-api.internal/history"
+RULE_CHECK = '''import pandas as pd
 
 
-def run(lot_ids):
-    resp = requests.post(EQP_API, json={"lot_ids": lot_ids}, timeout=30)
+def run(charts, response):
+    df = pd.DataFrame(response)
+    result = []
+    for c in charts:
+        v = df[df["chart_id"] == c["chart_id"]]["value"]
+        reasons = []
+        if v.empty:
+            reasons.append("Data 누락")
+        else:
+            if ((v > c["spec_usl"]) | (v < c["spec_lsl"])).any():
+                reasons.append("Spec out")
+            center = (c["spec_usl"] + c["spec_lsl"]) / 2
+            if (v > center).mean() > 0.9 or (v < center).mean() > 0.9:
+                reasons.append("편측")
+        result.append({"chart_id": c["chart_id"], "reasons": reasons})
+    return result
+'''
+
+ML_TREND_SHIFT = '''import joblib
+import pandas as pd
+
+MODEL = joblib.load("models/trend_shift.pkl")
+
+
+def run(response):
+    df = pd.DataFrame(response)
+    feats = df.groupby("chart_id")["value"].agg(["mean", "std", "min", "max"]).reset_index()
+    feats["trend_shift"] = MODEL.predict(feats[["mean", "std", "min", "max"]])
+    return feats[["chart_id", "trend_shift"]].to_dict("records")
+'''
+
+NG_SUMMARY = '''def run(charts, rule_result, ml_result):
+    info = {c["chart_id"]: c for c in charts}
+    shift = {r["chart_id"]: r["trend_shift"] for r in ml_result}
+    rows = []
+    for r in rule_result:
+        reasons = r["reasons"] + (["Trend Shift"] if shift.get(r["chart_id"]) else [])
+        if reasons:
+            c = info[r["chart_id"]]
+            rows.append({"chart_id": c["chart_id"], "chart_name": c["chart_name"], "item": c["item"],
+                         "ng_reason": ", ".join(reasons)})
+    return rows
+'''
+
+SAVE_POSTGRES = '''import os
+from datetime import date
+
+import psycopg2
+
+
+def run(ng_rows):
+    with psycopg2.connect(os.environ["PG_DSN"]) as conn, conn.cursor() as cur:
+        cur.executemany(
+            "INSERT INTO chart_ng (base_date, chart_id, chart_name, item, ng_reason) VALUES (%s, %s, %s, %s, %s)",
+            [(date.today(), r["chart_id"], r["chart_name"], r["item"], r["ng_reason"]) for r in ng_rows],
+        )
+    return len(ng_rows)
+'''
+
+CUBE_SEND = '''import os
+
+import requests
+
+
+def run(ng_rows, channel_id):
+    lines = [f"[이상 Chart {len(ng_rows)}건]"] + [f"- {r['chart_name']}: {r['ng_reason']}" for r in ng_rows]
+    resp = requests.post(os.environ["CUBE_WEBHOOK"], json={"channel": channel_id, "text": "\\n".join(lines)},
+                         timeout=30)
     resp.raise_for_status()
-    return resp.json()["rows"]
+    return resp.json()
 '''
 
-OUTLIER = '''import pandas as pd
+TREND_SKILL = '''from tools.tool_chart_list.main import run as chart_list
+from tools.tool_response_data.main import run as response_data
 
 
-def run(bad_lots, eqp_history):
-    df = pd.DataFrame(bad_lots).merge(pd.DataFrame(eqp_history), on="lot_id")
-    stats = df.groupby("eqp_id")["qty"].agg(["sum", "count"]).reset_index()
-    limit = stats["sum"].mean() + 2 * stats["sum"].std()
-    return stats[stats["sum"] > limit].to_dict("records")
+def run(user_id, base_date):
+    charts = chart_list(user_id)
+    return charts, response_data(charts, base_date)
 '''
 
-SUMMARY_REPORT = '''def run(candidates):
-    lines = ["# 불량 원인 후보", ""]
-    for c in candidates:
-        lines.append(f"- {c['eqp_id']}: 불량 {c['sum']}건 / LOT {c['count']}개")
-    return "\\n".join(lines)
+CLASSIFY_SKILL = '''from tools.tool_ml_trend_shift.main import run as ml_trend_shift
+from tools.tool_ng_summary.main import run as ng_summary
+from tools.tool_rule_check.main import run as rule_check
+
+
+def run(charts, response):
+    return ng_summary(charts, rule_check(charts, response), ml_trend_shift(response))
 '''
 
-LLM_REPORT = '''from llm_client import chat
+CUBE_SKILL = '''from tools.tool_cube_send.main import run as cube_send
+from tools.tool_save_postgres.main import run as save_postgres
 
-from .prompt import PROMPT
 
-
-def run(candidates):
-    return chat(PROMPT.format(candidates=candidates))
+def run(ng_rows, channel_id):
+    save_postgres(ng_rows)
+    return cube_send(ng_rows, channel_id)
 '''
 
-LLM_PROMPT = 'PROMPT = """다음 설비별 불량 집계를 보고 원인 후보를 3줄로 요약해줘.\\n{candidates}"""\n'
+OWNER = {"team": "품질팀", "owner": "12345678"}
+CHART_COLS = [{"name": "chart_id", "type": "str"}, {"name": "chart_name", "type": "str"},
+              {"name": "item", "type": "str"}]
+NG_COLS = CHART_COLS + [{"name": "ng_reason", "type": "str"}]
+
+
+def tool(key, name, description, tags, data_source, tables, params, output_schema, visibility="public"):
+    return {"key": key, "type": "tool", "name": name, "description": description, **OWNER, "tags": tags,
+            "entrypoint": f"tools/{key}/main.py", "code_visibility": visibility,
+            "spec": {"data_source": data_source, "tables": tables, "params": params, "output_schema": output_schema}}
+
+
+def skill(key, name, description, tags, input_schema, output_type):
+    return {"key": key, "type": "skill", "name": name, "description": description, **OWNER, "tags": tags,
+            "entrypoint": f"skills/{key}/main.py", "code_visibility": "public",
+            "spec": {"input_schema": input_schema, "output_type": output_type, "prompt": None}}
+
 
 TOOLS = [
-    {
-        "key": "tool_bad_lot_query", "type": "tool", "name": "불량 LOT 조회",
-        "description": "기간 내 불량 LOT과 공정 이력을 조회한다", "team": "품질팀", "owner": "12345678",
-        "tags": ["불량", "MES"], "entrypoint": "tools/tool_bad_lot_query/main.py",
-        "code_visibility": "allowlist", "allowlist": ["23456789"],
-        "spec": {
-            "data_source": "MES", "tables": ["MES.BAD_LOT", "MES.LOT_HIST"],
-            "params": [{"name": "start_date", "type": "date", "required": True},
-                       {"name": "end_date", "type": "date", "required": True}],
-            "output_schema": [{"name": "lot_id", "type": "str"}, {"name": "qty", "type": "int"},
-                              {"name": "step_id", "type": "str"}],
-        },
-    },
-    {
-        "key": "tool_equipment_history", "type": "tool", "name": "설비 이력 조회",
-        "description": "LOT이 거쳐간 설비 이력을 조회한다", "team": "설비팀", "owner": "34567890",
-        "tags": ["설비"], "entrypoint": "tools/tool_equipment_history/main.py", "code_visibility": "public",
-        "spec": {
-            "data_source": "EQP_API", "tables": ["EQP.HISTORY"],
-            "params": [{"name": "lot_ids", "type": "list[str]", "required": True}],
-            "output_schema": [{"name": "lot_id", "type": "str"}, {"name": "eqp_id", "type": "str"},
-                              {"name": "track_in", "type": "datetime"}],
-        },
-    },
+    tool("tool_daily_trigger", "Trigger", "매일 7시 스케줄링", ["스케줄"], "Scheduler", [],
+         [{"name": "job", "type": "callable", "required": True}], []),
+    tool("tool_chart_list", "Chart List 조회", "Lake에 접근하여 smartTAS-My Chart에서 List를 검색한다",
+         ["Lake", "smartTAS"], "Lake", ["smartTAS.MY_CHART"],
+         [{"name": "user_id", "type": "str", "required": True}],
+         CHART_COLS + [{"name": "spec_usl", "type": "float"}, {"name": "spec_lsl", "type": "float"}]),
+    tool("tool_response_data", "Response Data 조회",
+         "List 조회로 얻은 Chart 정보를 바탕으로 Lake 접근하여 Response Data를 검색한다",
+         ["Lake", "smartTAS"], "Lake", ["smartTAS.RESPONSE_DATA"],
+         [{"name": "charts", "type": "list[dict]", "required": True},
+          {"name": "base_date", "type": "date", "required": True}],
+         [{"name": "chart_id", "type": "str"}, {"name": "ts", "type": "datetime"}, {"name": "value", "type": "float"}]),
+    tool("tool_rule_check", "이상 분류-Rule", "Chart 별로 Rule 기반 검증(Spec out, Data 누락, 편측)",
+         ["이상분류", "Rule"], "Rule", [],
+         [{"name": "charts", "type": "list[dict]", "required": True},
+          {"name": "response", "type": "list[dict]", "required": True}],
+         [{"name": "chart_id", "type": "str"}, {"name": "reasons", "type": "list[str]"}]),
+    tool("tool_ml_trend_shift", "이상 분류-ML", "ML 모델로 Trend Shift 여부를 판단", ["이상분류", "ML"], "ML Model", [],
+         [{"name": "response", "type": "list[dict]", "required": True}],
+         [{"name": "chart_id", "type": "str"}, {"name": "trend_shift", "type": "bool"}], visibility="private"),
+    tool("tool_ng_summary", "Data 정리", "NG Chart에 대해서 차트 정보와 NG 사유를 정리", ["정리"], "Python", [],
+         [{"name": "charts", "type": "list[dict]", "required": True},
+          {"name": "rule_result", "type": "list[dict]", "required": True},
+          {"name": "ml_result", "type": "list[dict]", "required": True}], NG_COLS),
+    tool("tool_save_postgres", "Data 저장", "날짜, Chart 정보, NG 사유 등의 Data를 PostgreSQL DB에 저장",
+         ["PostgreSQL"], "PostgreSQL", ["chart_ng"],
+         [{"name": "ng_rows", "type": "list[dict]", "required": True}], [{"name": "count", "type": "int"}]),
+    tool("tool_cube_send", "Cube 공유", "정리된 Data를 Cube 채널에 전송", ["Cube", "알림"], "CUBE", [],
+         [{"name": "ng_rows", "type": "list[dict]", "required": True},
+          {"name": "channel_id", "type": "str", "required": True}], []),
 ]
 
-OUTLIER_SKILL = {
-    "key": "skill_outlier_preprocess", "type": "skill", "name": "이상치 전처리",
-    "description": "설비별 불량 수를 집계하고 평균+2σ를 넘는 설비를 고른다", "team": "품질팀", "owner": "12345678",
-    "tags": ["전처리"], "entrypoint": "skills/skill_outlier_preprocess/main.py", "code_visibility": "private",
-    "spec": {"input_schema": [{"name": "lot_id", "type": "str"}, {"name": "qty", "type": "int"},
-                              {"name": "eqp_id", "type": "str"}],
-             "output_type": "table", "prompt": None},
-}
+SKILLS = [
+    skill("skill_trend_query", "Trend 조회", "My Chart List와 Response Data를 조회한다", ["Trend"],
+          [{"name": "user_id", "type": "str"}, {"name": "base_date", "type": "date"}], "표"),
+    skill("skill_abnormal_classify", "이상 Chart 분류", "Rule과 ML로 이상 Chart를 분류하고 NG 사유를 정리한다",
+          ["이상분류"], [{"name": "chart_id", "type": "str"}, {"name": "value", "type": "float"}], "표"),
+    skill("skill_cube_share", "Cube 공유", "NG Chart를 DB에 저장하고 Cube 채널에 공유한다", ["Cube"], NG_COLS, "표"),
+]
 
-BASE = {
+# 업무 단계 하나 = skill 하나, 단계 안의 code node = tool
+STEPS = [
+    ("s1", "skill_trend_query", ["tool_daily_trigger", "tool_chart_list", "tool_response_data"]),
+    ("s2", "skill_abnormal_classify", ["tool_rule_check", "tool_ml_trend_shift", "tool_ng_summary"]),
+    ("s3", "skill_cube_share", ["tool_save_postgres", "tool_cube_send"]),
+]
+NODES = [t["key"] for t in TOOLS]
+SKILL_BY_KEY = {s["key"]: s for s in SKILLS}
+
+MANIFEST = {
     "workflow": {
-        "key": "wf_bad_lot_cause", "name": "불량 LOT 원인 분석", "family": "품질분석",
-        "description": "불량 LOT과 설비 이력을 묶어 원인 설비 후보를 찾는다",
-        "team": "품질팀", "owner": "12345678", "tags": ["불량", "원인분석"],
+        "key": "wf_chart_monitoring", "name": "이상 Chart 감지 및 Cube 공유", "family": "품질분석",
+        "description": "매일 My Chart의 Trend를 조회해 이상 Chart를 분류하고 Cube로 공유한다",
+        **OWNER, "tags": ["smartTAS", "이상감지", "Cube"],
     },
     "biz_steps": [
-        {"key": "s1", "title": "불량 데이터 조회", "description": "기간 내 불량 LOT과 설비 이력을 가져온다",
-         "code_nodes": ["n1", "n2"]},
-        {"key": "s2", "title": "원인 후보 정리", "description": "설비별로 모아 이상치를 고른다", "code_nodes": ["n3"]},
-        {"key": "s3", "title": "리포트 생성", "description": "후보 설비를 리포트로 정리한다", "code_nodes": ["n4"]},
+        {"key": k, "title": SKILL_BY_KEY[s]["name"], "description": SKILL_BY_KEY[s]["description"],
+         "skill": s, "code_nodes": [f"n{NODES.index(t) + 1}" for t in tools]}
+        for k, s, tools in STEPS
     ],
-    "code_nodes": [
-        {"key": "n1", "type": "tool", "ref": "tool_bad_lot_query"},
-        {"key": "n2", "type": "tool", "ref": "tool_equipment_history"},
-        {"key": "n3", "type": "skill", "ref": "skill_outlier_preprocess"},
-        {"key": "n4", "type": "skill", "ref": "skill_summary_report"},
-    ],
-    "code_edges": [["n1", "n3"], ["n2", "n3"], ["n3", "n4"]],
-    "items": TOOLS + [
-        OUTLIER_SKILL,
-        {
-            "key": "skill_summary_report", "type": "skill", "name": "요약 리포트",
-            "description": "원인 후보를 markdown 리포트로 만든다", "team": "품질팀", "owner": "12345678",
-            "tags": ["리포트"], "entrypoint": "skills/skill_summary_report/main.py", "code_visibility": "public",
-            "spec": {"input_schema": [{"name": "eqp_id", "type": "str"}, {"name": "sum", "type": "int"},
-                                      {"name": "count", "type": "int"}],
-                     "output_type": "markdown", "prompt": None},
-        },
-    ],
+    "code_nodes": [{"key": f"n{i + 1}", "type": "tool", "ref": key} for i, key in enumerate(NODES)],
+    "code_edges": [[f"n{i}", f"n{i + 1}"] for i in range(1, len(NODES))],
+    "items": TOOLS + SKILLS,
 }
 
-TEAM_A = {
-    "workflow": {
-        "key": "wf_bad_lot_cause_teamA", "name": "불량 LOT 원인 분석 (A팀형)", "family": "품질분석",
-        "description": "원본 흐름에서 리포트를 LLM 요약으로 바꾼 A팀 변형",
-        "team": "A팀", "owner": "23456789", "derived_from": "wf_bad_lot_cause", "tags": ["불량", "LLM"],
-    },
-    "biz_steps": BASE["biz_steps"][:2] + [
-        {"key": "s3", "title": "LLM 요약", "description": "후보 설비를 LLM으로 요약한다", "code_nodes": ["n4"]},
-    ],
-    "code_nodes": BASE["code_nodes"][:3] + [{"key": "n4", "type": "skill", "ref": "skill_llm_summary"}],
-    "code_edges": BASE["code_edges"],
-    "items": [
-        {
-            "key": "skill_llm_summary", "type": "skill", "name": "LLM 원인 요약",
-            "description": "설비별 집계를 LLM으로 3줄 요약한다", "team": "A팀", "owner": "23456789",
-            "tags": ["LLM", "리포트"], "entrypoint": "skills/skill_llm_summary/main.py", "code_visibility": "private",
-            "spec": {"input_schema": [{"name": "eqp_id", "type": "str"}, {"name": "sum", "type": "int"}],
-                     "output_type": "text",
-                     "prompt": "다음 설비별 불량 집계를 보고 원인 후보를 3줄로 요약해줘.\n{candidates}"},
-        },
-    ],
+CODE = {
+    "tools/tool_daily_trigger/main.py": DAILY_TRIGGER,
+    "tools/tool_chart_list/main.py": CHART_LIST,
+    "tools/tool_response_data/main.py": RESPONSE_DATA,
+    "tools/tool_rule_check/main.py": RULE_CHECK,
+    "tools/tool_ml_trend_shift/main.py": ML_TREND_SHIFT,
+    "tools/tool_ng_summary/main.py": NG_SUMMARY,
+    "tools/tool_save_postgres/main.py": SAVE_POSTGRES,
+    "tools/tool_cube_send/main.py": CUBE_SEND,
+    "skills/skill_trend_query/main.py": TREND_SKILL,
+    "skills/skill_abnormal_classify/main.py": CLASSIFY_SKILL,
+    "skills/skill_cube_share/main.py": CUBE_SKILL,
 }
 
 
@@ -171,13 +249,4 @@ def write_zip(name, manifest, files):
 
 
 if __name__ == "__main__":
-    write_zip("wf_bad_lot_cause.zip", BASE, {
-        "tools/tool_bad_lot_query/main.py": BAD_LOT_QUERY,
-        "tools/tool_equipment_history/main.py": EQUIPMENT_HISTORY,
-        "skills/skill_outlier_preprocess/main.py": OUTLIER,
-        "skills/skill_summary_report/main.py": SUMMARY_REPORT,
-    })
-    write_zip("wf_bad_lot_cause_teamA.zip", TEAM_A, {
-        "skills/skill_llm_summary/main.py": LLM_REPORT,
-        "skills/skill_llm_summary/prompt.py": LLM_PROMPT,
-    })
+    write_zip("wf_chart_monitoring.zip", MANIFEST, CODE)

@@ -106,12 +106,15 @@ export default function WorkflowDetail() {
         </Col>
         <Col span={16}>
           <Card title="Code Workflow" bodyStyle={{ padding: 0 }}>
+            {/* 단계 선택 시 그 단계의 node만 그린다. key에 step을 넣어 fitView를 다시 맞춘다 */}
             <CodeFlow
-              key={wf.key}
-              codeNodes={wf.code_nodes}
-              codeEdges={wf.code_edges}
+              key={`${wf.key}-${stepKey}`}
+              codeNodes={step ? wf.code_nodes.filter((n) => step.code_nodes?.includes(n.key)) : wf.code_nodes}
+              codeEdges={
+                step ? wf.code_edges.filter((e) => e.every((k) => step.code_nodes?.includes(k))) : wf.code_edges
+              }
               steps={wf.biz_steps}
-              highlighted={step ? new Set(step.code_nodes) : null}
+              highlighted={null}
               selectedKey={nodeKey}
               onNodeClick={(k) => select({ node: k })}
             />

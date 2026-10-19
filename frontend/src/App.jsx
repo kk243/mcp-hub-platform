@@ -20,7 +20,7 @@ export default function App() {
     { key: 'workflows', label: <Link to="/hub/workflows">Workflows</Link> },
     { key: 'tools', label: <Link to="/hub/tools">Tools</Link> },
     { key: 'skills', label: <Link to="/hub/skills">Skills</Link> },
-    me?.is_admin && { key: 'admin', label: <Link to="/hub/admin">관리</Link> },
+    { key: 'admin', label: <Link to="/hub/admin">관리</Link> },
   ].filter(Boolean)
 
   return (

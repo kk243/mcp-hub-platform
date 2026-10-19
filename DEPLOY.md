@@ -81,7 +81,7 @@ http://localhost:5173 에 접속하면 상단에 Workflows, Tools, Skills 메뉴
 ## 5. 동작 확인
 
 1. 화면 오른쪽 위에 사번이 보이면 사용자 식별이 된 것이다. SiteMinder를 거쳐 접속했다면 실제 본인 사번이 나와야 한다.
-2. 관리 > 업로드에서 `samples/wf_bad_lot_cause.zip`을 올리고 검증한 뒤 등록한다. 사내망에서 POST와 zip 업로드가 막히지 않는지 이걸로 확인한다.
+2. 관리 > 업로드에서 `samples/wf_chart_monitoring.zip`을 올리고 검증한 뒤 등록한다. 사내망에서 POST와 zip 업로드가 막히지 않는지 이걸로 확인한다.
 3. Workflows 메뉴에서 등록한 항목을 열고 그래프와 단계 클릭이 되는지 본다.
 4. 테스트가 끝나면 backend를 멈추고 `backend/data`, `backend/storage`를 지워 깨끗한 상태로 시작한다.
 

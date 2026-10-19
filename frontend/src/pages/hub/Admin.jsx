@@ -1,6 +1,5 @@
 import { useState } from 'react'
-import { useOutletContext } from 'react-router-dom'
-import { Alert, Button, Card, Form, Input, Modal, Radio, Result, Select, Space, Spin, Tabs, Tag, Upload, message } from 'antd'
+import { Alert, Button, Card, Form, Input, Modal, Radio, Select, Space, Tabs, Tag, Upload, message } from 'antd'
 import Grid from './Grid'
 import { deprecate, getItem, getWorkflow, importZip, setVisibility, updateMeta } from './api'
 import './hub.css'
@@ -247,10 +246,6 @@ function EditTab() {
 }
 
 export default function Admin() {
-  const me = useOutletContext()
-  if (!me) return <Spin />
-  if (!me.is_admin) return <Result status="403" title="관리자만 사용할 수 있습니다" />
-
   return (
     <Card>
       <Tabs

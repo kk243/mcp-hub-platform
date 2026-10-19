@@ -34,15 +34,14 @@ src/hub/importer.py  등록 zip 검증 → 저장
 로컬에서 권한을 확인하려면 `.env`의 `DEV_USER`를 바꾸거나 헤더를 직접 넣는다.
 
 ```bash
-curl -H "SM_USER: 99999999" http://localhost:8000/api/hub/items/tool_bad_lot_query/code
+curl -H "SM_USER: 99999999" http://localhost:8000/api/hub/items/tool_ml_trend_shift/code
 ```
 
 ## 샘플 등록
 
 ```bash
 python ../samples/make_sample.py
-curl -F file=@../samples/wf_bad_lot_cause.zip "http://localhost:8000/api/hub/admin/import?dry_run=0"
-curl -F file=@../samples/wf_bad_lot_cause_teamA.zip "http://localhost:8000/api/hub/admin/import?dry_run=0"
+curl -F file=@../samples/wf_chart_monitoring.zip "http://localhost:8000/api/hub/admin/import?dry_run=0"
 ```
 
 화면의 관리 > 업로드에서 올려도 된다.

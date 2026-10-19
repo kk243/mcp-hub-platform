@@ -474,6 +474,8 @@ items:                                 # 이번에 새로 들어오는 tool/skil
 
 ## 9. 로컬 분해 지시문 (운영팀이 raw code 폴더에서 Claude CLI에 사용)
 
+> 분해 기준과 보강된 지시문, 업로드 전 체크리스트는 `decompose-guide.md`에 있다.
+
 ```
 이 폴더의 agent 코드를 Agent Hub 등록 패키지로 만들어줘. 규격은 agent-hub-design.md §6.
 1. 사내 데이터 조회(DB query/API 호출) 코드는 type: tool, 가공/전처리/시각화/LLM 처리는 type: skill.

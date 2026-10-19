@@ -26,11 +26,6 @@ def current_user(request: Request):
     return user
 
 
-def require_admin(user: str = Depends(current_user)):
-    if user not in ADMIN_USERS:
-        raise HTTPException(403, "관리자만 사용할 수 있습니다")
-    return user
-
 
 def can_view_code(item, user):
     return (
@@ -141,7 +136,7 @@ def get_item_code(key: str, user: str = Depends(current_user)):
 
 
 @router.post("/admin/import")
-async def admin_import(dry_run: int = 1, file: UploadFile = File(...), _: str = Depends(require_admin)):
+async def admin_import(dry_run: int = 1, file: UploadFile = File(...)):
     return importer.import_zip(await file.read(), dry_run=bool(dry_run))
 
 
@@ -176,7 +171,7 @@ def _execute(sql, params):
 
 
 @router.post("/admin/update")
-def admin_update(body: UpdateBody, _: str = Depends(require_admin)):
+def admin_update(body: UpdateBody):
     table = _table(body.target)
     bad = set(body.fields) - EDITABLE
     if bad or not body.fields:
@@ -191,14 +186,14 @@ def admin_update(body: UpdateBody, _: str = Depends(require_admin)):
 
 
 @router.post("/admin/deprecate")
-def admin_deprecate(body: DeprecateBody, _: str = Depends(require_admin)):
+def admin_deprecate(body: DeprecateBody):
     table = _table(body.target)
     _execute(f"UPDATE {table} SET deprecated = 1, replaced_by = ? WHERE key = ?", (body.replaced_by or None, body.key))
     return {"ok": True}
 
 
 @router.post("/admin/visibility")
-def admin_visibility(body: VisibilityBody, _: str = Depends(require_admin)):
+def admin_visibility(body: VisibilityBody):
     if body.code_visibility not in VISIBILITIES:
         raise HTTPException(400, "code_visibility는 public, allowlist, private 중 하나여야 합니다")
     _execute("UPDATE items SET code_visibility = ?, allowlist = ? WHERE key = ?",

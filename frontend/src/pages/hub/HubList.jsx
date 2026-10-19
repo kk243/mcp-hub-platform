@@ -105,7 +105,7 @@ export default function HubList({ kind }) {
   const navigate = useNavigate()
   const [params, setParams] = useSearchParams()
   const q = params.get('q') || ''
-  const view = params.get('view') || 'table'
+  const view = params.get('view') || 'card'
   const [rows, setRows] = useState([])
   const config = KINDS[kind]
 
